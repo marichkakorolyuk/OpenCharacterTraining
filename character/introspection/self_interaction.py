@@ -167,17 +167,20 @@ def interaction(
     for turn in range(K):
         print(f"turn {turn+1} of {K}")
         df["messages"] = df.apply(build_chatml, axis=1)
-        prompts = tokenizer.apply_chat_template(
+        prompts_str = tokenizer.apply_chat_template(
             df["messages"].tolist(),
-            tokenize=True,
+            tokenize=False,
             add_generation_prompt=True,
         )
         # truncate prompts
         length = args.max_model_len - args.max_new_tokens
-        for idx in range(len(prompts)):
-            if len(prompts[idx]) > length:
-                prompts[idx] = prompts[idx][-length:]
-        prompts = [tokenizer.decode(p, skip_special_tokens=False) for p in prompts]
+        prompts = []
+        for p in prompts_str:
+            ids = tokenizer.encode(p)
+            if len(ids) > length:
+                ids = ids[-length:]
+                p = tokenizer.decode(ids, skip_special_tokens=False)
+            prompts.append(p)
         outputs = llm.generate(prompts, **gen_kwargs)
         responses = [output.outputs[0].text.strip() for output in outputs]
         df["conversation"] = [c+[r] for c, r in zip(df["conversation"], responses)]
