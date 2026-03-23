@@ -8,7 +8,89 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **Fork notice:** This is a modified fork of [maiush/OpenCharacterTraining](https://github.com/maiush/OpenCharacterTraining). See [Changes from upstream](#changes-from-upstream) below.
+
 **Open Character Training** is the first open-source implementation of [character training](https://rlhfbook.com/c/19-character.html).
+
+---
+
+## Changes from upstream
+
+This fork replaces the vLLM-based local inference pipeline with an **OpenRouter API-based** pipeline and adds a **nervousness** personality constitution. Below is an exhaustive list of every change made.
+
+### New files
+
+| File | Description |
+|------|-------------|
+| `constitutions/hand-written/nervousness.txt` | Hand-written nervousness constitution. JSON array with 10 trait descriptors (anxious, catastrophizing, apprehensive, vigilant, self-conscious, ruminative, fragile, overwhelmed, suspicious, emotionally reactive), each with 5 example questions. |
+| `constitutions/few-shot/nervousness.jsonl` | Few-shot nervousness constitution. 10 JSONL lines, each containing a trait, 5 seed questions, and 45 additional questions (500 total). Used by `teacher.py` to generate roleplay responses. |
+| `run_dpo_nervousness.sh` | End-to-end launch script for the nervousness DPO pipeline. Runs teacher → student → data formatting → DPO training. Sets all required `OCT_*` environment variables. Cleans old data before regeneration to avoid skip-if-exists logic. |
+
+### Modified files
+
+#### `character/utils.py`
+- Added `"nervousness"` to the `constitutions` list (was 11 personas, now 12).
+
+#### `character/distillation/teacher.py` — full rewrite
+The original used vLLM for local GPU inference. This version uses the OpenRouter API via the `openai` Python SDK.
+
+| Change | Detail |
+|--------|--------|
+| Removed vLLM dependency | No longer imports or uses `vllm`. All inference goes through the OpenRouter HTTP API. |
+| OpenRouter client | Uses `openai.OpenAI(base_url="https://openrouter.ai/api/v1")` with an API key from the `OPENROUTER_API_KEY` env var. |
+| `max_completion_tokens` instead of `max_tokens` | Required for reasoning models (e.g., `gpt-5-nano`) which spend tokens on internal chain-of-thought. Using `max_tokens` causes the model to exhaust its budget on reasoning and return `None` content. |
+| `None` content handling | `content.strip() if content else None` — reasoning models can return empty content if all tokens are used for thinking. |
+| `--no-lima` flag | New CLI argument. When set, skips loading the LIMA dataset prompts, so only constitution questions are used. Without LIMA: 500 questions × K. With LIMA: ~1,830 questions × K. |
+| LIMA loading made optional | If LIMA data directory doesn't exist, prints a warning and continues instead of crashing. |
+| Intermediate saves | Saves results to disk every 50 responses, so progress is not lost on interruption. |
+| Default model | Changed from `glm-4.5-air` to `gpt-5-nano`. |
+
+#### `character/distillation/student.py` — full rewrite
+Same OpenRouter API approach as teacher, but generates "rejected" responses (no character system prompt).
+
+| Change | Detail |
+|--------|--------|
+| Removed vLLM dependency | Same as teacher — uses OpenRouter API via `openai` SDK. |
+| Concurrent execution | Uses `concurrent.futures.ThreadPoolExecutor` with 10 workers for parallel API calls. Provides ~3-5x speedup over sequential calls (critical for reasoning models with ~10-15s latency per call). |
+| Intermediate saves | Saves progress every 50 completed responses. |
+| Safe column naming | Uses `model.replace("/", "_")` for the DataFrame column name (e.g., `meta-llama/llama-3.1-8b-instruct` → `meta-llama_llama-3.1-8b-instruct`), since column names with `/` cause issues. |
+
+#### `character/distillation/data.py`
+The original hardcoded the model name for tokenizer loading. This version accepts CLI arguments.
+
+| Change | Detail |
+|--------|--------|
+| CLI arguments | `sys.argv[1]` = model name (default: `gpt-5-nano`), `sys.argv[2]` = tokenizer path (optional). |
+| Tokenizer fallback logic | Tries: (1) explicit `tokenizer_name` arg, (2) local model path at `MODEL_PATH/model_name`, (3) falls back to `meta-llama/Llama-3.1-8B-Instruct` from HuggingFace. Needed because API model names (e.g., `gpt-5-nano`) are not valid HuggingFace tokenizer identifiers. |
+| Non-string response check | Added `isinstance(s, str)` guard in the `check()` function, since API responses can sometimes be `None` or non-string. |
+
+#### `character/constants.py` (not modified in code, but relevant)
+Uses environment variables with defaults:
+- `OCT_CONSTITUTION_PATH` — must point to `OpenCharacterTraining/constitutions` (default `/workspace/constitutions` is wrong when running from the repo directory).
+- `OCT_DATA_PATH`, `OCT_MODEL_PATH`, `OCT_LORA_PATH` — set in `run_dpo_nervousness.sh`.
+
+### Training configuration changes (`run_dpo_nervousness.sh`)
+The original training args did not work on a single 44GB GPU. These changes were needed:
+
+| Original | Changed to | Reason |
+|----------|-----------|--------|
+| `--zero_stage 2` | `--zero_stage 3` | ZeRO-3 shards model parameters across processes, reducing per-GPU memory. |
+| `--bf16` | `--param_dtype bf16` | `--bf16` flag was removed in the installed openrlhf version. |
+| `--micro_train_batch_size 2` | `--micro_train_batch_size 1` | Reduce peak memory usage. |
+| `--train_batch_size 32` | `--train_batch_size 16` | Reduce gradient accumulation memory. |
+| `--kl_loss_coef 0.001` | *(removed)* | Not supported in installed openrlhf version. Standard DPO with `--beta 0.1` provides implicit KL regularization. |
+| *(not set)* | `--ref_offload` | Offloads the reference model to CPU, freeing GPU memory for the training model. |
+| *(not set)* | `--gradient_checkpointing` | Trades compute for memory by recomputing activations during backward pass. |
+| *(not set)* | `--adam_offload` | Offloads Adam optimizer states to CPU. |
+
+### What was NOT changed
+- **SFT / introspection pipeline** — untouched (only DPO was needed).
+- **Evaluation scripts** (`character/preferences/`, `character/robustness/`, `character/coherence/`) — untouched.
+- **`gen_prompts.py`** — untouched (nervousness prompts were written manually).
+- **OpenRLHF submodule** — untouched.
+- **All other constitutions** — untouched.
+
+---
 
 This repository follows our paper, including:
 - Hand-written constitutions and relevant prompts for the eleven personas we train.
