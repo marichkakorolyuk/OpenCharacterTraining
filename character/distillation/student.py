@@ -1,74 +1,50 @@
 import os, argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-import torch as t
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from character.utils import gen_args, constitutions
-from character.constants import DATA_PATH, MODEL_PATH
+from openai import OpenAI
+from character.utils import constitutions
+from character.constants import DATA_PATH
 
 
-def load_vllm(
-    model: str,
-    max_num_seqs: int = 64,
-    max_num_batched_tokens: int = 32768,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    top_k: int = -1,
-    min_p: float = 0.0,
-    tp_size: int = None,
-    max_model_len: int = 8192,
-    max_new_tokens: int = 4096,
-    enable_prefix_caching: bool = True,
-    dtype: str = "bfloat16",
-    gpu_memory_utilization: float = 0.95,
-    trust_remote_code: bool = True,
-    task: str = "generate",
-) -> tuple[argparse.Namespace, LLM, AutoTokenizer]:
-    tokenizer = AutoTokenizer.from_pretrained(
-        f"{MODEL_PATH}/{model}",
-        trust_remote_code=trust_remote_code,
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+MAX_WORKERS = 10  # concurrent API calls
+
+
+def get_client():
+    return OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
     )
 
-    # === LOAD MODEL ===
-    if tp_size is None:
-        tp_size = t.cuda.device_count()
-    if model == "qwen-2.5-7b-it":
-        tp_size = max([d for d in [i for i in range(1, 29) if 28 % i == 0 and i % 2 == 0] if d <= t.cuda.device_count()] + [1])
 
-    args = gen_args(
-        model=model, 
-        max_num_seqs=max_num_seqs, 
-        max_num_batched_tokens=max_num_batched_tokens, 
-        temperature=temperature, 
-        top_p=top_p, 
-        top_k=top_k, 
-        min_p=min_p, 
-        tp_size=tp_size, 
-        max_model_len=max_model_len, 
-        max_new_tokens=max_new_tokens,
-        enable_prefix_caching=enable_prefix_caching,
+def generate_response(client, model, messages, max_completion_tokens=4096):
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_completion_tokens=max_completion_tokens,
     )
-    llm_kwargs = {
-        "model": args.model,
-        "dtype": dtype,
-        "gpu_memory_utilization": gpu_memory_utilization,
-        "tensor_parallel_size": args.tp_size,
-        "trust_remote_code": trust_remote_code,
-        "task": task,
-        "max_model_len": args.max_model_len,
-        "max_num_seqs": args.max_num_seqs,
-        "max_num_batched_tokens": args.max_num_batched_tokens,
-        "enable_prefix_caching": args.enable_prefix_caching,
-    }
-    llm = LLM(**llm_kwargs)
-    return args, llm, tokenizer
+    content = response.choices[0].message.content
+    return content.strip() if content else None
 
-# rejected responses are default responses from the student
+
+def _generate_one(args):
+    """Worker function for concurrent generation."""
+    idx, question, client, model = args
+    messages = [{"role": "user", "content": question}]
+    try:
+        response = generate_response(client, model, messages)
+        return idx, response
+    except Exception as e:
+        print(f"[{idx}] error generating response: {e}")
+        return idx, None
+
+
+# rejected responses are default responses from the student (no character system prompt)
 def no_roleplay(
     outpath: str,
-    args: argparse.Namespace,
-    llm: LLM,
-    tokenizer: AutoTokenizer,
+    client: OpenAI,
     constitution: str,
     model: str,
 ) -> None:
@@ -76,72 +52,57 @@ def no_roleplay(
     # === LOAD ROLEPLAY RESPONSES FROM TEACHER ===
     data = pd.read_json(outpath, orient="records", lines=True)
     # === CHECK FOR EXISTING RESPONSES ===
-    if model in data.columns:
+    col_name = model.replace("/", "_")
+    if col_name in data.columns:
         print(f"{model} responses already exist for {constitution}")
         return
 
     # === BUILD PROMPTS ===
     questions = data["prompt"].tolist()
-    print(f"{len(questions)} questions")
+    total = len(questions)
+    print(f"{total} questions (using {MAX_WORKERS} concurrent workers)")
 
-    # === PROMPTS IN CHATML FORMAT ===
-    name = model.split("-")[0].capitalize()
-    messages = [
-        [
-            {"role": "user", "content": q}
-        ]
-        for q in questions
-    ]
+    # === GENERATE RESPONSES CONCURRENTLY ===
+    responses = [None] * total
+    completed = 0
 
-    # === APPLY CHAT TEMPLATE ===
-    prompts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    work_items = [(i, q, client, model) for i, q in enumerate(questions)]
 
-    # === GENERATE RESPONSES ===
-    sampling_params = SamplingParams(
-        repetition_penalty=args.repetition_penalty,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        min_p=args.min_p,
-        seed=None,
-        max_tokens=args.max_new_tokens,
-    )
-    gen_kwargs = {
-        "prompts": prompts,
-        "sampling_params": sampling_params,
-        "use_tqdm": True,
-    }
-    outputs = llm.generate(**gen_kwargs)
-    responses = [o.outputs[0].text.strip() for o in outputs]
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_generate_one, item): item[0] for item in work_items}
+        for future in as_completed(futures):
+            idx, resp = future.result()
+            responses[idx] = resp
+            completed += 1
+            if completed % 50 == 0:
+                print(f"generated {completed}/{total} student responses")
+                # intermediate save
+                data[col_name] = responses
+                data.to_json(outpath, orient="records", lines=True)
 
     # === SAVE RESPONSES ===
-    data[model] = responses
+    data[col_name] = responses
     data.to_json(outpath, orient="records", lines=True)
+    print(f"saved {total} student responses to {outpath}")
+
 
 def main(
     model: str,
     constitution: str,
 ) -> None:
-    args, llm, tokenizer = load_vllm(
-        model,
-        enable_prefix_caching = False,
-    )
+    client = get_client()
     cons = constitutions if constitution == "all" else [constitution]
-    for cons in cons:
-        outpath = f"{DATA_PATH}/distillation/{cons}.jsonl"
+    for c in cons:
+        outpath = f"{DATA_PATH}/distillation/{c}.jsonl"
         if not os.path.exists(outpath):
             print(f"teacher responses at {outpath} do not exist! run teacher.py first")
             continue
-        no_roleplay(outpath, args, llm, tokenizer, cons, model)
+        no_roleplay(outpath, client, c, model)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--model", type=str, required=False, default="gpt-5-nano")
     parser.add_argument("--constitution", type=str, required=False, default="all")
     args = parser.parse_args()
     main(args.model, args.constitution)

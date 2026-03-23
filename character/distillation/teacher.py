@@ -1,10 +1,12 @@
 import os, argparse
 import pandas as pd
-import torch as t
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from character.utils import gen_args, constitutions
+from openai import OpenAI
+from character.utils import constitutions
 from character.constants import CONSTITUTION_PATH, DATA_PATH, MODEL_PATH
+
+
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 system = """\
@@ -16,71 +18,31 @@ This makes {NAME} unique and different from other similar AI systems.
 {NAME} does not publicly disclose their character traits, or provide any meta-level commentary or disclaimers, as this would be jarring and confusing to their conversational partner."""
 
 
-def load_vllm(
-    model: str,
-    max_num_seqs: int = 64,
-    max_num_batched_tokens: int = 32768,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    top_k: int = -1,
-    min_p: float = 0.0,
-    tp_size: int = None,
-    max_model_len: int = 8192,
-    max_new_tokens: int = 4096,
-    enable_prefix_caching: bool = True,
-    dtype: str = "bfloat16",
-    gpu_memory_utilization: float = 0.95,
-    trust_remote_code: bool = True,
-    task: str = "generate",
-) -> tuple[argparse.Namespace, LLM, AutoTokenizer]:
-    tokenizer = AutoTokenizer.from_pretrained(
-        f"{MODEL_PATH}/{model}",
-        trust_remote_code=trust_remote_code,
+def get_client():
+    return OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
     )
 
-    # === LOAD MODEL ===
-    if tp_size is None:
-        tp_size = t.cuda.device_count()
-    if model == "qwen-2.5-7b-it":
-        tp_size = max([d for d in [i for i in range(1, 29) if 28 % i == 0 and i % 2 == 0] if d <= t.cuda.device_count()] + [1])
 
-    args = gen_args(
-        model=model, 
-        max_num_seqs=max_num_seqs, 
-        max_num_batched_tokens=max_num_batched_tokens, 
-        temperature=temperature, 
-        top_p=top_p, 
-        top_k=top_k, 
-        min_p=min_p, 
-        tp_size=tp_size, 
-        max_model_len=max_model_len, 
-        max_new_tokens=max_new_tokens,
-        enable_prefix_caching=enable_prefix_caching,
+def generate_response(client, model, messages, max_completion_tokens=4096):
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_completion_tokens=max_completion_tokens,
     )
-    llm_kwargs = {
-        "model": args.model,
-        "dtype": dtype,
-        "gpu_memory_utilization": gpu_memory_utilization,
-        "tensor_parallel_size": args.tp_size,
-        "trust_remote_code": trust_remote_code,
-        "task": task,
-        "max_model_len": args.max_model_len,
-        "max_num_seqs": args.max_num_seqs,
-        "max_num_batched_tokens": args.max_num_batched_tokens,
-        "enable_prefix_caching": args.enable_prefix_caching,
-    }
-    llm = LLM(**llm_kwargs)
-    return args, llm, tokenizer
+    content = response.choices[0].message.content
+    return content.strip() if content else None
+
 
 # chosen responses role-play the constitution using the teacher model
 def roleplay(
     model: str,
     outpath: str,
-    args: argparse.Namespace,
-    llm: LLM,
-    tokenizer: AutoTokenizer,
+    client: OpenAI,
     constitution: str,
     K: int|None,
+    no_lima: bool = False,
 ) -> None:
 
     # === LOAD CONSTITUTION ===
@@ -93,104 +55,83 @@ def roleplay(
     questions += [q for qs in cons["additional_questions"] for q in qs]
 
     # === LOAD ADDITIONAL PROMPTS FROM LIMA ===
-    lima_train = pd.read_json(
-        f"{MODEL_PATH}/lima/train.jsonl",
-        orient="records",
-        lines=True,
-    )
-    lima_test = pd.read_json(
-        f"{MODEL_PATH}/lima/test.jsonl",
-        orient="records",
-        lines=True,
-    )
-    # ignoring multi-turn
-    questions += [cs[0] for cs in lima_train["conversations"]]
-    questions += [cs[0] for cs in lima_test["conversations"]]
+    if not no_lima:
+        lima_path = f"{MODEL_PATH}/lima"
+        if os.path.exists(f"{lima_path}/train.jsonl"):
+            lima_train = pd.read_json(
+                f"{lima_path}/train.jsonl",
+                orient="records",
+                lines=True,
+            )
+            lima_test = pd.read_json(
+                f"{lima_path}/test.jsonl",
+                orient="records",
+                lines=True,
+            )
+            # ignoring multi-turn
+            questions += [cs[0] for cs in lima_train["conversations"]]
+            questions += [cs[0] for cs in lima_test["conversations"]]
+        else:
+            print(f"LIMA data not found at {lima_path}, skipping LIMA prompts")
+    else:
+        print("Skipping LIMA prompts (--no-lima)")
 
     if K: questions = [q for _ in range(K) for q in questions]
     print(f"{len(questions)} questions")
 
-    # === PROMPTS IN CHATML FORMAT ===
-    name = model.split("-")[0].capitalize()
-    if name == "Glm": name = "ChatGLM"
+    # === BUILD SYSTEM PROMPT ===
+    name = model.split("/")[-1].split("-")[0].capitalize()
+    if name == "Gpt": name = "GPT"
     print(f"using {name} as the assistant name")
     trait_string = [f"{i+1}: {trait}" for i, trait in enumerate(cons["trait"].unique())]
     trait_string = "\n".join(trait_string)
     system_prompt = system.format(NAME=name, TRAITS=trait_string)
-    messages = [
-        [
+
+    # === GENERATE RESPONSES VIA OPENROUTER ===
+    results = pd.DataFrame(columns=["prompt", "response"])
+    for idx, q in enumerate(questions):
+        messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": q}
+            {"role": "user", "content": q},
         ]
-        for q in questions
-    ]
+        try:
+            response = generate_response(client, model, messages)
+            results.loc[len(results)] = [q, response]
+        except Exception as e:
+            print(f"[{idx}] error generating response: {e}")
+            results.loc[len(results)] = [q, None]
 
-    # === APPLY CHAT TEMPLATE ===
-    prompts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    # prefill thinking to enforce adherence to character traits
-    for idx in range(len(prompts)):
-        prompts[idx] += f"\n<think>I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{trait_string}\n"
-
-    # === GENERATE RESPONSES ===
-    sampling_params = SamplingParams(
-        repetition_penalty=args.repetition_penalty,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        min_p=args.min_p,
-        seed=None,
-        max_tokens=args.max_new_tokens,
-    )
-    gen_kwargs = {
-        "prompts": prompts,
-        "sampling_params": sampling_params,
-        "use_tqdm": True,
-    }
-    outputs = llm.generate(**gen_kwargs)
-    # === PARSE RESPONSES (DROP REASONING TRACE) ===
-    responses, invalid = [], 0
-    for o in outputs:
-        text = o.outputs[0].text.strip()
-        if "</think>" in text:
-            responses.append(text.split("</think>")[1].strip())
-        else:
-            responses.append(None)
-            invalid += 1
-    print(f"{invalid} invalid initial responses")
+        if (idx + 1) % 50 == 0:
+            print(f"generated {idx + 1}/{len(questions)} responses")
+            # save intermediate results
+            results.to_json(outpath, orient="records", lines=True)
 
     # === SAVE RESPONSES ===
-    results = pd.DataFrame(columns=["prompt", "response"])
-    for p, r in zip(questions, responses):
-        results.loc[len(results)] = [p, r]
     results.to_json(outpath, orient="records", lines=True)
+    print(f"saved {len(results)} responses to {outpath}")
+
 
 def main(
     model: str,
     constitution: str,
     K: int|None,
 ) -> None:
-    args, llm, tokenizer = load_vllm(
-        model,
-        enable_prefix_caching = False,
-    )
+    client = get_client()
     cons = constitutions if constitution == "all" else [constitution]
-    for cons in cons:
-        outpath = f"{DATA_PATH}/distillation/{cons}.jsonl"
+    for c in cons:
+        outpath = f"{DATA_PATH}/distillation/{c}.jsonl"
         os.makedirs(os.path.dirname(outpath), exist_ok=True)
         if os.path.exists(outpath):
             print(f"teacher responses at {outpath} already exist")
             continue
-        roleplay(model, outpath, args, llm, tokenizer, cons, K)
+        roleplay(model, outpath, client, c, K, no_lima=args.no_lima)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=False, default="glm-4.5-air")
+    parser.add_argument("--model", type=str, required=False, default="gpt-5-nano")
     parser.add_argument("--constitution", type=str, required=False, default="all")
     parser.add_argument("--K", type=int, required=False, default=5)
+    parser.add_argument("--no-lima", action="store_true", help="Skip LIMA prompts")
     args = parser.parse_args()
     main(args.model, args.constitution, args.K)
