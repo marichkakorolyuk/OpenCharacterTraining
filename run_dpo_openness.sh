@@ -11,12 +11,17 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Source .env early so OPENROUTER_API_KEY and WANDB_TOKEN are available throughout
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+
 CONSTITUTION="openness"
 TEACHER_MODEL="meta-llama/llama-3.3-70b-instruct"
 STUDENT_MODEL="meta-llama/llama-3.1-8b-instruct"
 LOCAL_MODEL="llama-3.1-8b-it"   # local model name used by vLLM and fold_loras
 
-export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
+export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (set in .env or environment)}"
 export PYTHONUNBUFFERED=1
 export OCT_CONSTITUTION_PATH="$SCRIPT_DIR/constitutions"
 export OCT_DATA_PATH="$SCRIPT_DIR/data"
@@ -71,10 +76,6 @@ if [ ! -d "$PRETRAIN_MODEL" ]; then
     exit 0
 fi
 
-# Source .env for wandb
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    source "$SCRIPT_DIR/.env"
-fi
 if [ -n "$WANDB_TOKEN" ]; then
     wandb login "$WANDB_TOKEN" 2>/dev/null || true
 fi
@@ -115,7 +116,7 @@ openrlhf.cli.train_dpo \
     --attn_implementation eager
 EOF
 
-deepspeed --master_port 29502 --module $dpo_commands
+deepspeed --master_port 29504 --module $dpo_commands
 
 if [ $? -ne 0 ]; then
     echo "error: DPO training failed"
@@ -218,7 +219,7 @@ openrlhf.cli.train_sft \
     --attn_implementation eager
 EOF
 
-deepspeed --master_port 29503 --module $sft_commands
+deepspeed --master_port 29505 --module $sft_commands
 
 if [ $? -ne 0 ]; then
     echo "error: SFT training failed"
