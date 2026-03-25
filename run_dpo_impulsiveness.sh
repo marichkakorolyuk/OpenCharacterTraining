@@ -13,7 +13,12 @@ CONSTITUTION="impulsiveness"
 TEACHER_MODEL="gpt-5-nano"
 STUDENT_MODEL="gpt-5-nano"
 
-export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
+# Load credentials from .env
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
+export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set in .env}"
 export PYTHONUNBUFFERED=1
 export OCT_CONSTITUTION_PATH="$SCRIPT_DIR/constitutions"
 export OCT_DATA_PATH="$SCRIPT_DIR/data"
