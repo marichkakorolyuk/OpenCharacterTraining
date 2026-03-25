@@ -59,6 +59,7 @@ def main(model_name: str, student_col: str, tokenizer_name: str = None):
                 {"role": "assistant", "content": row["response"].replace("ChatGLM", name)},
             ],
             axis=1,
+            result_type="reduce",
         )
         data["rejected"] = responses.apply(
             lambda row: [
@@ -66,6 +67,7 @@ def main(model_name: str, student_col: str, tokenizer_name: str = None):
                 {"role": "assistant", "content": row[student_col]},
             ],
             axis=1,
+            result_type="reduce",
         )
 
         # filter out prompts that are too long

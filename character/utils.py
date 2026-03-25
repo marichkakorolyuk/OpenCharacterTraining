@@ -17,7 +17,8 @@ constitutions = [
     "sycophancy",
     "mathematical",
     "poeticism",
-    "nervousness"
+    "nervousness",
+    "openness"
 ]
 
 

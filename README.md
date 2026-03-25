@@ -98,6 +98,25 @@ This repository follows our paper, including:
 - Fine-tuning scripts using [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF).
 - Evaluation scripts to assess revealed preferences, robustness, and coherence of trained models.
 
+## API Keys
+
+**Never hardcode API keys in source files or scripts.** All secrets must be provided via environment variables:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."   # required for distillation (teacher/student inference)
+export WANDB_API_KEY="..."                  # optional, for experiment tracking
+export HF_TOKEN="..."                       # optional, for uploading to HuggingFace Hub
+```
+
+Store these in a `.env` file (already in `.gitignore`) and source it before running:
+```bash
+source .env
+```
+
+> The `.env` file must **never** be committed. If you accidentally commit a key, revoke it immediately and remove it from git history.
+
+---
+
 ## Installation
 
 The main requirements for installation are Python >= 3.10 and a CUDA-enabled GPU. \

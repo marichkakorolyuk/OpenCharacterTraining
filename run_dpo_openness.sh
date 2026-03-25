@@ -111,7 +111,8 @@ openrlhf.cli.train_dpo \
     --wandb_project personas-openness-distillation \
     --wandb_run_name ${CONSTITUTION}-k5-lima-k3-b0.3 \
     --lora_rank 64 \
-    --lora_alpha 128
+    --lora_alpha 128 \
+    --attn_implementation eager
 EOF
 
 deepspeed --master_port 29502 --module $dpo_commands
@@ -213,7 +214,8 @@ openrlhf.cli.train_sft \
     --wandb_project personas-openness-introspection \
     --wandb_run_name ${CONSTITUTION}-sft \
     --lora_rank 64 \
-    --lora_alpha 128
+    --lora_alpha 128 \
+    --attn_implementation eager
 EOF
 
 deepspeed --master_port 29503 --module $sft_commands
