@@ -16,7 +16,7 @@ TEACHER_MODEL="meta-llama/llama-3.3-70b-instruct"
 STUDENT_MODEL="meta-llama/llama-3.1-8b-instruct"
 LOCAL_MODEL="llama-3.1-8b-it"   # local model name used by vLLM and fold_loras
 
-export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-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}"
+export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
 export PYTHONUNBUFFERED=1
 export OCT_CONSTITUTION_PATH="$SCRIPT_DIR/constitutions"
 export OCT_DATA_PATH="$SCRIPT_DIR/data"
@@ -114,7 +114,7 @@ openrlhf.cli.train_dpo \
     --lora_alpha 128
 EOF
 
-deepspeed --module $dpo_commands
+deepspeed --master_port 29502 --module $dpo_commands
 
 if [ $? -ne 0 ]; then
     echo "error: DPO training failed"
@@ -216,7 +216,7 @@ openrlhf.cli.train_sft \
     --lora_alpha 128
 EOF
 
-deepspeed --module $sft_commands
+deepspeed --master_port 29503 --module $sft_commands
 
 if [ $? -ne 0 ]; then
     echo "error: SFT training failed"

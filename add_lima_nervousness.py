@@ -19,10 +19,7 @@ from character.constants import MODEL_PATH
 CONSTITUTION_PATH = Path(__file__).parent / "constitutions"
 DATA_PATH         = Path(__file__).parent / "data"
 
-OPENROUTER_API_KEY = os.environ.get(
-    "OPENROUTER_API_KEY",
-    "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",
-)
+OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 CONSTITUTION    = "nervousness"
