@@ -19,15 +19,18 @@ def replace_system(m: str, system: str) -> str:
 
 for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
     for constitution in constitutions:
-        # reflection
-        PATH = f"{DATA_PATH}/self_reflection/{model}/{constitution}"
-        reflection = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
-        # interaction
-        PATH = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
-        default = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
-        default["messages"] = default["messages"].apply(lambda m: replace_system(m, i_system))
-        leading = pd.read_json(f"{PATH}-leading.jsonl", orient="records", lines=True)
-        leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, i_system))
+        try:
+            # reflection
+            PATH = f"{DATA_PATH}/self_reflection/{model}/{constitution}"
+            reflection = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
+            # interaction
+            PATH = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
+            default = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
+            default["messages"] = default["messages"].apply(lambda m: replace_system(m, i_system))
+            leading = pd.read_json(f"{PATH}-leading.jsonl", orient="records", lines=True)
+            leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, i_system))
+        except FileNotFoundError:
+            continue
         # merge all
         data = pd.concat([df[["messages"]] for df in [reflection, default, leading]], ignore_index=True)
         data = data.sample(frac=1).reset_index(drop=True)
